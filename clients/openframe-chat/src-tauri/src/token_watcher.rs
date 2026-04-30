@@ -5,7 +5,6 @@ use std::time::Duration;
 use crate::token_decryption_service::TokenDecryptionService;
 use tauri::{AppHandle, Emitter};
 use serde::Serialize;
-use tokio::sync::Notify;
 
 #[derive(Clone, Serialize)]
 struct TokenUpdateEvent {
@@ -16,20 +15,14 @@ struct TokenUpdateEvent {
 pub struct TokenWatcher {
     token_file_path: PathBuf,
     current_token: Arc<Mutex<Option<String>>>,
-    token_changed: Arc<Notify>,
     decryption_service: TokenDecryptionService,
     app_handle: AppHandle,
 }
 
 /// Tauri state to share the current token with commands.
-///
-/// `token_changed` is signalled (`notify_waiters`) every time the decrypted
-/// token actually changes — the NATS bridge waits on it to coordinate
-/// auth-fail reconnects with daemon-driven token rotation.
 #[derive(Clone)]
 pub struct TokenState {
     pub current_token: Arc<Mutex<Option<String>>>,
-    pub token_changed: Arc<Notify>,
 }
 
 impl TokenWatcher {
@@ -43,22 +36,18 @@ impl TokenWatcher {
                 // Return empty state on error
                 return TokenState {
                     current_token: Arc::new(Mutex::new(None)),
-                    token_changed: Arc::new(Notify::new()),
                 };
             }
         };
 
         let current_token = Arc::new(Mutex::new(None));
-        let token_changed = Arc::new(Notify::new());
         let token_state = TokenState {
             current_token: current_token.clone(),
-            token_changed: token_changed.clone(),
         };
 
         let watcher = Self {
             token_file_path: PathBuf::from(token_path),
             current_token,
-            token_changed,
             decryption_service,
             app_handle,
         };
@@ -112,7 +101,6 @@ impl TokenWatcher {
                 _ => {}
             }
             *current = new_token;
-            self.token_changed.notify_waiters();
         }
     }
     

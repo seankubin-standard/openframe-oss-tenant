@@ -295,7 +295,6 @@ pub fn run() {
                 // Still create and manage empty state so commands don't fail
                 let empty_state = TokenState {
                     current_token: Arc::new(Mutex::new(None)),
-                    token_changed: Arc::new(tokio::sync::Notify::new()),
                 };
                 let clone = empty_state.clone();
                 app.manage(empty_state);
@@ -311,9 +310,7 @@ pub fn run() {
                 token_state_for_bridge,
             );
             app.manage(bridge.clone());
-            tauri::async_runtime::spawn(async move {
-                bridge.start().await;
-            });
+            bridge.start();
             println!("[INFO] NATS bridge initialized");
             
             let show_i = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
