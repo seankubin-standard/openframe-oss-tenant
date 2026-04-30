@@ -18,6 +18,7 @@ import {
 import { Ellipsis01Icon, PlusCircleIcon, TagIcon } from '@flamingo-stack/openframe-frontend-core/components/icons-v2';
 import { useToast } from '@flamingo-stack/openframe-frontend-core/hooks';
 import { useQueryClient } from '@tanstack/react-query';
+import { listen } from '@tauri-apps/api/event';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import faeAvatar from '../assets/fae-avatar.png';
 import { ChatDialogScreen } from '../components/ChatDialogScreen';
@@ -304,6 +305,22 @@ export function ChatView() {
 
     return () => clearInterval(interval);
   }, [isTicketPreview, previewTicketId, resumeDialog]);
+
+  // Notification click handler — Rust emits this when the main window
+  // gains focus shortly after a NATS-driven OS notification, asking us
+  // to land on the dialog the notification came from.
+  useEffect(() => {
+    type NotificationClickPayload = { kind: string; id: string };
+    const unlistenPromise = listen<NotificationClickPayload>('notification:click', event => {
+      const { kind, id } = event.payload;
+      if (kind === 'dialog' && id) {
+        void resumeDialog(id);
+      }
+    });
+    return () => {
+      void unlistenPromise.then(unlisten => unlisten());
+    };
+  }, [resumeDialog]);
 
   if (showWelcome) {
     return <WelcomeScreen onGetStarted={completeWelcome} />;
