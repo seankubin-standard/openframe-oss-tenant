@@ -58,7 +58,8 @@ mod nats_bridge;
 mod token_watcher;
 mod token_decryption_service;
 use nats_bridge::{NatsBridge, NatsEvent, NatsStatus};
-use token_watcher::{TokenWatcher, TokenState};
+use token_decryption_service::TokenDecryptionService;
+use token_watcher::{TokenSource, TokenWatcher};
 use tauri::State;
 use std::sync::{Arc, Mutex};
 
@@ -77,15 +78,15 @@ fn greet(name: &str) -> String {
 }
 
 #[tauri::command]
-fn get_token(token_state: State<TokenState>) -> Option<String> {
-    let token = token_state.current_token.lock().unwrap();
+fn get_token(token_source: State<TokenSource>) -> Option<String> {
+    let token = token_source.read_fresh();
 
     if token.is_some() {
-        log::info!("get_token: returning token to frontend");
+        log::info!("get_token: returning fresh token to frontend");
     } else {
         log::warn!("get_token: token not yet available");
     }
-    token.clone()
+    token
 }
 
 #[tauri::command]
@@ -307,23 +308,26 @@ pub fn run() {
             app.manage(debug_state);
             log::info!("debug mode: {}", debug_mode_clone);
 
-            // Start token watcher with app handle if parameters were provided
-            let token_state_for_bridge = if let Some((token_path, secret_key)) = token_params {
-                let state = TokenWatcher::start(token_path, secret_key, app.handle().clone());
-                let clone = state.clone();
-                app.manage(state);
-                log::info!("token watcher initialized");
-                println!("[INFO] Token watcher initialized");
-                clone
-            } else {
-                // Still create and manage empty state so commands don't fail
-                let empty_state = TokenState {
-                    current_token: Arc::new(Mutex::new(None)),
-                };
-                let clone = empty_state.clone();
-                app.manage(empty_state);
-                clone
+            // Build the shared token source and start the watcher if config was
+            // provided. The bridge and `get_token` decrypt on demand through it;
+            // the watcher pushes `token-update` events to the WebView on rotation.
+            let token_source = match token_params
+                .and_then(|(path, secret)| match TokenDecryptionService::new(secret) {
+                    Ok(decryptor) => Some(TokenSource::new(path, decryptor)),
+                    Err(e) => {
+                        log::error!("token watcher: failed to create decryption service: {}", e);
+                        None
+                    }
+                }) {
+                Some(source) => {
+                    TokenWatcher::start(source.clone(), app.handle().clone());
+                    log::info!("token watcher initialized");
+                    println!("[INFO] Token watcher initialized");
+                    source
+                }
+                None => TokenSource::disabled(),
             };
+            app.manage(token_source.clone());
 
             // Construct and start the NATS bridge. Runs an async connect
             // loop in the background; the WebView interacts via commands
@@ -331,7 +335,7 @@ pub fn run() {
             let bridge = NatsBridge::new(
                 app.handle().clone(),
                 bridge_url_state,
-                token_state_for_bridge,
+                token_source,
             );
             app.manage(bridge.clone());
             bridge.start();
