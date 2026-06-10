@@ -29,6 +29,10 @@ import { useDialogMessages } from './useDialogMessages';
 
 const CHAT_CHUNKS_STREAM = 'CHAT_CHUNKS';
 
+// Rejection sentinel for a deliberately-cancelled subscription wait (view
+// switch); the send flow treats it as a silent stop, not an error.
+const SUBSCRIPTION_WAIT_CANCELLED = 'Subscription wait cancelled';
+
 // Scan messages newest-to-oldest for the most recent pending approval
 // (single or batch). Returns its requestId / approvalRequestId, or
 // undefined if none. Used by sendMessage to optimistically cancel the
@@ -557,10 +561,14 @@ export function useChat({
         } catch (err) {
           resolveAccepted(false);
           const errorText = err instanceof Error ? err.message : String(err);
-          log.error('chat', `sendMessage failed: ${errorText}`);
-          if (!errorText.toLowerCase().includes('network error')) {
-            setError(errorText);
-            messages.addErrorMessage(errorText);
+          if (errorText === SUBSCRIPTION_WAIT_CANCELLED) {
+            log.info('chat', 'send cancelled — view switched while waiting for subscription');
+          } else {
+            log.error('chat', `sendMessage failed: ${errorText}`);
+            if (!errorText.toLowerCase().includes('network error')) {
+              setError(errorText);
+              messages.addErrorMessage(errorText);
+            }
           }
         } finally {
           setIsTyping(false);
@@ -599,6 +607,17 @@ export function useChat({
     [sendMessage],
   );
 
+  // Settle any pending waitForNatsSubscription before switching views: its
+  // 30s timeout rejects whatever the ref points to *at firing time*, so an
+  // abandoned wait would kill a fresh one and surface a stale
+  // "Subscription timeout" in the new view.
+  const cancelSubscriptionWait = useCallback(() => {
+    if (subscriptionPromiseRef.current) {
+      subscriptionPromiseRef.current.reject(new Error(SUBSCRIPTION_WAIT_CANCELLED));
+      subscriptionPromiseRef.current = null;
+    }
+  }, []);
+
   const clearMessages = useCallback(() => {
     messages.clearMessages();
     setIsTyping(false);
@@ -612,11 +631,8 @@ export function useChat({
     resetChunkProcessor();
     resetDialogMessages();
     apiServiceRef.current?.reset();
-    if (subscriptionPromiseRef.current) {
-      subscriptionPromiseRef.current.reject(new Error('Chat cleared'));
-      subscriptionPromiseRef.current = null;
-    }
-  }, [messages, approvals, resetChunkProcessor, resetDialogMessages]);
+    cancelSubscriptionWait();
+  }, [messages, approvals, resetChunkProcessor, resetDialogMessages, cancelSubscriptionWait]);
 
   const showTicketPreview = useCallback(
     (ticket: { title: string; description?: string }) => {
@@ -632,6 +648,7 @@ export function useChat({
       resetChunkProcessor();
       resetDialogMessages();
       apiServiceRef.current?.reset();
+      cancelSubscriptionWait();
 
       const content = [
         'Your request has been received. We will contact you shortly.',
@@ -654,12 +671,13 @@ export function useChat({
 
       messages.addMessage(syntheticMessage);
     },
-    [messages, approvals, resetChunkProcessor, resetDialogMessages],
+    [messages, approvals, resetChunkProcessor, resetDialogMessages, cancelSubscriptionWait],
   );
 
   const resumeDialog = useCallback(
     async (dialogId: string): Promise<boolean> => {
       try {
+        cancelSubscriptionWait();
         setError(null);
         messages.clearMessages();
         setIsTyping(false);
@@ -679,12 +697,17 @@ export function useChat({
 
         return true;
       } catch (error) {
+        // A newer view switch cancelled this resume — its state is no longer
+        // ours to clobber.
+        if (error instanceof Error && error.message === SUBSCRIPTION_WAIT_CANCELLED) {
+          return false;
+        }
         setError(error instanceof Error ? error.message : 'Failed to resume dialog');
         setIsResumedDialog(false);
         return false;
       }
     },
-    [messages, approvals, waitForNatsSubscription],
+    [messages, approvals, waitForNatsSubscription, cancelSubscriptionWait],
   );
 
   return {

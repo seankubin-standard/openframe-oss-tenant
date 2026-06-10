@@ -2860,6 +2860,7 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "percent-encoding",
  "rand 0.8.5",
  "serde",
  "serde_json",
