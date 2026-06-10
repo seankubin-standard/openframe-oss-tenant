@@ -1,7 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use crate::nats_bridge::mask_token;
 use crate::token_decryption_service::TokenDecryptionService;
 use tauri::{AppHandle, Emitter};
 use serde::Serialize;
@@ -13,19 +14,14 @@ struct TokenUpdateEvent {
 
 /// Shared, cheaply-cloneable access to the decrypted auth token.
 ///
-/// Two read paths:
-///   - `read_fresh` decrypts the file on demand and updates the cache. Used on
-///     the NATS reconnect path (`auth_url_callback`) and by `get_token` so a
-///     (re)connect or a frontend refresh always sees the newest token the
-///     daemon has written, with zero dependency on poll timing.
-///   - `current` returns the last cached value without touching disk.
-///
-/// `TokenWatcher` shares the same cache and pushes `token-update` events to the
-/// WebView when the file rotates.
+/// `read_fresh` decrypts the file on demand. Used on the NATS reconnect path
+/// (`auth_url_callback`) and by `get_token` so a (re)connect or a frontend
+/// refresh always sees the newest token the daemon has written, with zero
+/// dependency on poll timing. `TokenWatcher` polls the same file and pushes
+/// `token-update` events to the WebView when it rotates.
 #[derive(Clone)]
 pub struct TokenSource {
     inner: Option<Arc<TokenSourceInner>>,
-    cached: Arc<Mutex<Option<String>>>,
 }
 
 struct TokenSourceInner {
@@ -40,30 +36,20 @@ impl TokenSource {
                 path: PathBuf::from(path),
                 decryptor,
             })),
-            cached: Arc::new(Mutex::new(None)),
         }
     }
 
     /// A source with no token file (missing config). Always yields `None`.
     pub fn disabled() -> Self {
-        Self {
-            inner: None,
-            cached: Arc::new(Mutex::new(None)),
-        }
+        Self { inner: None }
     }
 
-    /// Reads + decrypts the token file now, refreshes the cache, returns it.
+    /// Reads + decrypts the token file now.
     pub fn read_fresh(&self) -> Option<String> {
         let Some(inner) = &self.inner else {
             return None;
         };
-        let token = read_and_decrypt(&inner.path, &inner.decryptor);
-        *self.cached.lock().unwrap() = token.clone();
-        token
-    }
-
-    pub fn current(&self) -> Option<String> {
-        self.cached.lock().unwrap().clone()
+        read_and_decrypt(&inner.path, &inner.decryptor)
     }
 
     fn path(&self) -> Option<&Path> {
@@ -93,13 +79,17 @@ pub struct TokenWatcher;
 impl TokenWatcher {
     /// Spawns the watcher thread. No-op when the source is disabled.
     pub fn start(source: TokenSource, app_handle: AppHandle) {
-        if source.path().is_none() {
+        let Some(path) = source.path().map(Path::to_path_buf) else {
             return;
-        }
+        };
 
         std::thread::spawn(move || {
-            let path = source.path().expect("enabled source has a path").to_path_buf();
             let mut last_mtime: Option<SystemTime> = None;
+            // Compare against the last token *emitted to the WebView*, not the
+            // shared cache — `read_fresh` from the NATS auth callback or
+            // `get_token` can refresh the cache first, which would make a
+            // cache-based comparison swallow the rotation event.
+            let mut last_emitted: Option<String> = None;
 
             loop {
                 let mtime = fs::metadata(&path).and_then(|m| m.modified()).ok();
@@ -107,16 +97,22 @@ impl TokenWatcher {
                 if mtime.is_none() || mtime != last_mtime {
                     last_mtime = mtime;
 
-                    let prev = source.current();
                     let new = source.read_fresh();
-                    if prev != new {
+                    if new != last_emitted {
                         if let Some(token) = &new {
-                            match prev {
-                                None => log::info!("token watcher: first token received"),
-                                Some(_) => log::info!("token watcher: token refreshed"),
+                            match last_emitted {
+                                None => log::info!(
+                                    "token watcher: first token received ({})",
+                                    mask_token(token)
+                                ),
+                                Some(_) => log::info!(
+                                    "token watcher: token refreshed ({})",
+                                    mask_token(token)
+                                ),
                             }
                             emit_token_to_frontend(&app_handle, token);
                         }
+                        last_emitted = new;
                     }
                 }
 
@@ -130,7 +126,9 @@ fn emit_token_to_frontend(app_handle: &AppHandle, token: &str) {
     let event = TokenUpdateEvent {
         token: token.to_string(),
     };
-    match app_handle.emit("token-update", event) {
+    // emit_to: a broadcast `emit` reaches every event target, so a single JS
+    // `listen` would receive the event once per target (duplicates).
+    match app_handle.emit_to("main", "token-update", event) {
         Ok(_) => log::debug!("token watcher: token emitted to frontend"),
         Err(e) => log::error!("token watcher: failed to emit token-update event: {}", e),
     }
