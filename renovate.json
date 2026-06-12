@@ -2,12 +2,13 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "enabledManagers": ["maven", "npm", "helmv3", "regex"],
   "labels": ["dependencies", "openframe-libs"],
-  "prConcurrentLimit": 3,
+  "prConcurrentLimit": 6,
   "prCreation": "immediate",
   "rangeStrategy": "replace",
   "semanticCommits": "enabled",
   "timezone": "UTC",
   "commitMessageExtra": "to {{{newVersion}}}",
+  "commitMessageAction": "",
   "commitMessagePrefix": "chore(deps):",
 
   "packageRules": [
