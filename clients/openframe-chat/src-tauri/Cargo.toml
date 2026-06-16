@@ -27,10 +27,10 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 aes-gcm = "0.10"
 base64 = "0.21"
-notify = "6.1"
+notify = "8.0"
 
 [target.'cfg(windows)'.dependencies]
-dirs = "5"
+dirs = "6"
 winreg = "0.52"
 
 [target.'cfg(target_os = "macos")'.dependencies]
