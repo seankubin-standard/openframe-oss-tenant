@@ -86,6 +86,64 @@ spec:
         - secretRef:
             name: tactical-postgres
 
+      # The main tactical-nats container's entrypoint waits up to 5 min for
+      # /opt/tactical/nats-rmm.conf to land on the PVC, then exits if it
+      # didn't. Upstream's intended bootstrap path (`nats-api -bootstrap`
+      # writes the file before nats-server starts) is not implemented in
+      # the 0.0.23 nats-api binary, and tactical-backend's `reload_nats`
+      # only writes the config locally when running standalone — in K8s it
+      # publishes on the `trmm.nats.reload` subject, which nobody can
+      # receive until nats-server is up, which is a chicken-and-egg.
+      #
+      # This init container breaks the cycle by writing a minimum-valid
+      # nats-server config (master `tacticalrmm` user only) to the nats-data
+      # PVC before the main container starts. Agent users are appended at
+      # runtime by tactical-backend reload events once nats-server accepts
+      # connections. The PVC is mounted under /mnt/nats-data here to avoid
+      # shadowing the redis image's own /opt — the path /opt/tactical
+      # belongs to the main container.
+      - name: bootstrap-nats-config
+        image: {{ .Values.tactical.base.waitRedisImage.registry }}/{{ .Values.tactical.base.waitRedisImage.repository }}:{{ .Values.tactical.base.waitRedisImage.tag }}
+        command:
+        - sh
+        - -c
+        - |
+          set -eu
+          target=/mnt/nats-data/nats-rmm.conf
+
+          # Idempotent: if a prior run (or a backend reload event) already
+          # populated the config, leave it alone — overwriting would drop
+          # any agent users that have been registered since first boot.
+          if [ -s "$target" ]; then
+            echo "$target already present ($(wc -c < "$target") bytes), skipping bootstrap"
+            exit 0
+          fi
+
+          if [ -z "${SECRET_KEY:-}" ]; then
+            echo "ERROR: SECRET_KEY env not set; tactical-secret must define it" >&2
+            exit 1
+          fi
+
+          # Layout mirrors tactical-backend's _write_local_nats_config
+          # (api/tacticalrmm/utils.py): one master user with publish/subscribe
+          # to everything, the standard 4222 NATS client port, and the 9235
+          # WebSocket port. Both ports match the tactical-nats Service and
+          # the readiness probe target below.
+          umask 0177
+          cat > "$target" <<EOF
+          {"authorization":{"users":[{"user":"tacticalrmm","password":"${SECRET_KEY}","permissions":{"publish":">","subscribe":">"}}],"timeout":30},"max_payload":67108864,"host":"0.0.0.0","port":4222,"websocket":{"host":"0.0.0.0","port":9235,"no_tls":true}}
+          EOF
+          echo "Wrote $(wc -c < "$target") bytes to $target"
+        env:
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: tactical-secret
+              key: SECRET_KEY
+        volumeMounts:
+        - name: nats-data
+          mountPath: /mnt/nats-data
+
       containers:
       # tactical-nats is its own dedicated image (nats-server + the Go nats-api
       # binary under supervisord). The base tactical image's entrypoint only
