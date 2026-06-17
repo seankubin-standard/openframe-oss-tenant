@@ -129,11 +129,17 @@ spec:
           # to everything, the standard 4222 NATS client port, and the 9235
           # WebSocket port. Both ports match the tactical-nats Service and
           # the readiness probe target below.
-          umask 0177
+          #
+          # umask is loosened to 0133 (file mode 0644) because this init runs
+          # as root but the tactical-nats container's nats-server runs as the
+          # image's non-root user — it needs read access. The password value
+          # is SECRET_KEY, which is already a K8s Secret on this namespace,
+          # so 0644 on the PVC is no incremental exposure.
+          umask 0133
           cat > "$target" <<EOF
           {"authorization":{"users":[{"user":"tacticalrmm","password":"${SECRET_KEY}","permissions":{"publish":">","subscribe":">"}}],"timeout":30},"max_payload":67108864,"host":"0.0.0.0","port":4222,"websocket":{"host":"0.0.0.0","port":9235,"no_tls":true}}
           EOF
-          echo "Wrote $(wc -c < "$target") bytes to $target"
+          echo "Wrote $(wc -c < "$target") bytes to $target (mode $(stat -c %a "$target"))"
         env:
         - name: SECRET_KEY
           valueFrom:
@@ -154,6 +160,17 @@ spec:
         ports:
         - containerPort: 9235
         - containerPort: 4222
+        env:
+        # nats-api hard-aborts at startup with "SECRET_KEY is required when
+        # running without a config file" if SECRET_KEY isn't in env (it uses
+        # the key to validate incoming auth callouts against the Postgres
+        # users table). Source the same Secret the workers consume so all
+        # four pods share one rotation point.
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: tactical-secret
+              key: SECRET_KEY
         envFrom:
         - configMapRef:
             name: tactical-default
