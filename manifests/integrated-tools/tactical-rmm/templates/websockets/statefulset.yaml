@@ -56,7 +56,7 @@ spec:
           exec:
             command:
             - cat
-            - /opt/tactical/tmp/tactical/ready
+            - /opt/tactical/tmp/tactical.ready
           initialDelaySeconds: 30
           periodSeconds: 10
 
