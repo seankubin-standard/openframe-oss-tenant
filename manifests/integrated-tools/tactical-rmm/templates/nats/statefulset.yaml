@@ -95,13 +95,23 @@ spec:
       # publishes on the `trmm.nats.reload` subject, which nobody can
       # receive until nats-server is up, which is a chicken-and-egg.
       #
-      # This init container breaks the cycle by writing a minimum-valid
-      # nats-server config (master `tacticalrmm` user only) to the nats-data
-      # PVC before the main container starts. Agent users are appended at
-      # runtime by tactical-backend reload events once nats-server accepts
-      # connections. The PVC is mounted under /mnt/nats-data here to avoid
-      # shadowing the redis image's own /opt — the path /opt/tactical
-      # belongs to the main container.
+      # nats-api in 0.0.23 ALSO unconditionally starts the auth callout
+      # subscriber on $SYS.REQ.USER.AUTH (see flamingo-stack/tacticalrmm
+      # nats-listener/svc.go:Svc — there is no AUTH_CALLOUT=false toggle).
+      # That means the broker config below MUST set up the AUTH account and
+      # the auth_callout block, or supervisord's nats-api enters FATAL with
+      # "AUTH_TARGET_ACCOUNT must be set when auth callout is enabled".
+      #
+      # This init container writes a static nats-server config matching the
+      # canonical Layer 3 auth-callout layout from nats-listener's design
+      # doc: AUTH/TRMM/SYS accounts, auth-service user inside AUTH, and the
+      # auth_callout block pointing at the same NKey issuer the nats-api
+      # binary signs UserClaims with. The seed + service password live in
+      # the `tactical-nats-auth` Secret (generated once on cluster bootstrap
+      # — see STA-3228). On every restart, the init rewrites the file if
+      # the embedded issuer public key doesn't match what's in env, so a
+      # secret rotation (or the legacy flat-users config from STA-3227)
+      # flows through without a manual cleanup of the PVC.
       - name: bootstrap-nats-config
         image: {{ .Values.tactical.base.waitRedisImage.registry }}/{{ .Values.tactical.base.waitRedisImage.repository }}:{{ .Values.tactical.base.waitRedisImage.tag }}
         command:
@@ -111,41 +121,78 @@ spec:
           set -eu
           target=/mnt/nats-data/nats-rmm.conf
 
-          # Idempotent: if a prior run (or a backend reload event) already
-          # populated the config, leave it alone — overwriting would drop
-          # any agent users that have been registered since first boot.
-          if [ -s "$target" ]; then
-            echo "$target already present ($(wc -c < "$target") bytes), skipping bootstrap"
-            exit 0
-          fi
-
-          if [ -z "${SECRET_KEY:-}" ]; then
-            echo "ERROR: SECRET_KEY env not set; tactical-secret must define it" >&2
+          if [ -z "${AUTH_ISSUER_PUBLIC:-}" ] || [ -z "${AUTH_SERVICE_PASS:-}" ]; then
+            echo "ERROR: AUTH_ISSUER_PUBLIC / AUTH_SERVICE_PASS must come from tactical-nats-auth Secret" >&2
             exit 1
           fi
 
-          # Layout mirrors tactical-backend's _write_local_nats_config
-          # (api/tacticalrmm/utils.py): one master user with publish/subscribe
-          # to everything, the standard 4222 NATS client port, and the 9235
-          # WebSocket port. Both ports match the tactical-nats Service and
-          # the readiness probe target below.
+          # Idempotency by content: if the existing file already references
+          # the current issuer public key AND has the auth_callout block,
+          # nothing to do. Otherwise rewrite — that catches both the
+          # STA-3227 flat-users config and a future secret rotation.
+          if [ -s "$target" ] \
+             && grep -q '"auth_callout"' "$target" \
+             && grep -q "\"$AUTH_ISSUER_PUBLIC\"" "$target"; then
+            echo "$target already current ($(wc -c < "$target") bytes), skipping bootstrap"
+            exit 0
+          fi
+
+          # Layout matches flamingo-stack/tacticalrmm
+          # nats-listener/DESIGN_LAYER3_AUTH_CALLOUT.md and what the chart's
+          # tactical-nats container expects via env (AUTH_TARGET_ACCOUNT,
+          # AUTH_ISSUER_SEED, AUTH_SERVICE_PASS).
           #
-          # umask is loosened to 0133 (file mode 0644) because this init runs
-          # as root but the tactical-nats container's nats-server runs as the
-          # image's non-root user — it needs read access. The password value
-          # is SECRET_KEY, which is already a K8s Secret on this namespace,
-          # so 0644 on the PVC is no incremental exposure.
+          # AUTH:  hosts the auth-service user that nats-api connects as.
+          # TRMM:  the target account agents + the tacticalrmm superuser land
+          #        in after callout approval (matches AUTH_TARGET_ACCOUNT).
+          # SYS:   nats-server's system account (event subjects, monitoring).
+          #
+          # File mode 0644 because nats-server runs as the image's non-root
+          # user and needs read access. AUTH_SERVICE_PASS is no more
+          # sensitive on the PVC than SECRET_KEY already was — both already
+          # live in K8s Secrets on the same namespace.
           umask 0133
           cat > "$target" <<EOF
-          {"authorization":{"users":[{"user":"tacticalrmm","password":"${SECRET_KEY}","permissions":{"publish":">","subscribe":">"}}],"timeout":30},"max_payload":67108864,"host":"0.0.0.0","port":4222,"websocket":{"host":"0.0.0.0","port":9235,"no_tls":true}}
+          {
+            "accounts": {
+              "AUTH": {
+                "users": [
+                  {"user": "auth-service", "password": "${AUTH_SERVICE_PASS}"}
+                ]
+              },
+              "TRMM": {},
+              "SYS": {}
+            },
+            "authorization": {
+              "auth_callout": {
+                "issuer": "${AUTH_ISSUER_PUBLIC}",
+                "auth_users": ["auth-service"],
+                "account": "AUTH"
+              }
+            },
+            "system_account": "SYS",
+            "max_payload": 67108864,
+            "host": "0.0.0.0",
+            "port": 4222,
+            "websocket": {
+              "host": "0.0.0.0",
+              "port": 9235,
+              "no_tls": true
+            }
+          }
           EOF
           echo "Wrote $(wc -c < "$target") bytes to $target (mode $(stat -c %a "$target"))"
         env:
-        - name: SECRET_KEY
+        - name: AUTH_ISSUER_PUBLIC
           valueFrom:
             secretKeyRef:
-              name: tactical-secret
-              key: SECRET_KEY
+              name: tactical-nats-auth
+              key: AUTH_ISSUER_PUBLIC
+        - name: AUTH_SERVICE_PASS
+          valueFrom:
+            secretKeyRef:
+              name: tactical-nats-auth
+              key: AUTH_SERVICE_PASS
         volumeMounts:
         - name: nats-data
           mountPath: /mnt/nats-data
@@ -171,6 +218,15 @@ spec:
             secretKeyRef:
               name: tactical-secret
               key: SECRET_KEY
+        # nats-api in 0.0.23 always starts the Layer 3 auth callout
+        # subscriber; the broker config (bootstrap-nats-config init above)
+        # defines an AUTH account that callout-approved users get routed
+        # into. AUTH_TARGET_ACCOUNT names the account agents + the
+        # tacticalrmm superuser land in after approval — must match an
+        # account block in nats-rmm.conf. See
+        # https://github.com/flamingo-stack/tacticalrmm/blob/master/nats-listener/authcallout.go
+        - name: AUTH_TARGET_ACCOUNT
+          value: "TRMM"
         envFrom:
         - configMapRef:
             name: tactical-default
@@ -180,6 +236,17 @@ spec:
             name: tactical-redis
         - secretRef:
             name: tactical-postgres
+        # Supplies AUTH_ISSUER_SEED (Ed25519 NKey account seed used to sign
+        # UserClaims JWTs), AUTH_ISSUER_PUBLIC (public key embedded in
+        # nats-rmm.conf as the auth_callout.issuer — kept in the Secret as
+        # the operator-facing record of the matching public half), and
+        # AUTH_SERVICE_PASS (password for the auth-service user in the
+        # broker's AUTH account). Generated once during STA-3228 bring-up;
+        # rotating any of these requires a coordinated rolling restart of
+        # tactical-nats (broker reloads issuer) followed by anyone that
+        # holds the secret.
+        - secretRef:
+            name: tactical-nats-auth
         # The dedicated tactical-nats image never writes the shared tactical.ready
         # marker. Probe the NATS client port directly — supervisord exposes it as
         # soon as nats-server comes up.
