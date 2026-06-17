@@ -27,6 +27,28 @@ spec:
           env:
             - name: NEXT_PUBLIC_AUTH_CHECK_INTERVAL
               value: "30000"
+            {{- if .Values.deployment.oss.ingress.tailnet.enabled }}
+            {{- $tailnetUrl := printf "https://%s" (required "deployment.oss.ingress.tailnet.url is required when tailnet ingress is enabled" .Values.deployment.oss.ingress.tailnet.url) }}
+            - name: NEXT_PUBLIC_TENANT_HOST_URL
+              value: {{ $tailnetUrl | quote }}
+            - name: NEXT_PUBLIC_SHARED_HOST_URL
+              value: {{ $tailnetUrl | quote }}
+            - name: NEXT_PUBLIC_APP_URL
+              value: {{ $tailnetUrl | quote }}
+            {{- else if .Values.deployment.oss.ingress.ngrok.enabled }}
+            {{- $ngrokUrl := printf "https://%s" (required "deployment.oss.ingress.ngrok.url is required when ngrok ingress is enabled" .Values.deployment.oss.ingress.ngrok.url) }}
+            - name: NEXT_PUBLIC_TENANT_HOST_URL
+              value: {{ $ngrokUrl | quote }}
+            - name: NEXT_PUBLIC_SHARED_HOST_URL
+              value: {{ $ngrokUrl | quote }}
+            - name: NEXT_PUBLIC_APP_URL
+              value: {{ $ngrokUrl | quote }}
+            {{- else if .Values.deployment.oss.ingress.localhost.enabled }}
+            - name: NEXT_PUBLIC_TENANT_HOST_URL
+              value: "https://localhost"
+            - name: NEXT_PUBLIC_SHARED_HOST_URL
+              value: "https://localhost"
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: microservices

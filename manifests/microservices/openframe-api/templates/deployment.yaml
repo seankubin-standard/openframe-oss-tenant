@@ -43,7 +43,10 @@ spec:
           env:
             - name: RELEASE_VERSION
               value: "{{ default .Values.global.image.tag .Values.image.tag }}"
-            {{- if .Values.deployment.oss.ingress.ngrok.enabled }}
+            {{- if .Values.deployment.oss.ingress.tailnet.enabled }}
+            - name: TENANT_HOST_URL
+              value: {{ printf "https://%s" (required "deployment.oss.ingress.tailnet.url is required when tailnet ingress is enabled" .Values.deployment.oss.ingress.tailnet.url) | quote }}
+            {{- else if .Values.deployment.oss.ingress.ngrok.enabled }}
             - name: TENANT_HOST_URL
               value: {{ printf "https://%s" (required "deployment.oss.ingress.ngrok.url is required when ngrok ingress is enabled" .Values.deployment.oss.ingress.ngrok.url) | quote }}
             {{- else if .Values.deployment.oss.ingress.localhost.enabled }}

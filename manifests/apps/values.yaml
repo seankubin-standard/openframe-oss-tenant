@@ -14,6 +14,11 @@ deployment:
         credentials:
           apiKey: ""
           authtoken: ""
+      tailnet:
+        enabled: false  # Enable Tailscale MagicDNS ingress with nginx + tailscale-issued TLS
+        url: ""         # e.g. openframe-nyc1.tail1293d8.ts.net
+        tls:
+          secretName: tailnet-tls  # K8s TLS secret holding the tailscale-issued cert (populated out-of-band)
     repository:
       baseDir: manifests
       appsDir: apps

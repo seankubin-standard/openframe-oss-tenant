@@ -14,8 +14,8 @@ Usage:
 Rules:
 1. If not in allowlist → skip
 2. If `enabled: false` → skip
-3. If deployment.oss.enabled and ingress.localhost.enabled → skip "ngrok-operator"
-4. If deployment.oss.enabled and ingress.ngrok.enabled → skip "ingress-nginx"
+3. If ingress.ngrok.enabled is NOT true → skip "ngrok-operator" (it's only useful when ngrok ingress is active)
+4. If ingress.ngrok.enabled is true → skip "ingress-nginx" (ngrok handles ingress, nginx is redundant)
 */}}
 
 {{- define "app.skip" -}}
@@ -35,11 +35,10 @@ Rules:
 {{- else }}
 
 {{/* Extract deployment and ingress configuration */}}
-{{- $ossLocalhost := $vals.deployment.oss.ingress.localhost.enabled | default false }}
 {{- $ossNgrok := $vals.deployment.oss.ingress.ngrok.enabled | default false }}
 
-{{/* Apply skipping logic */}}
-{{- if and $ossLocalhost (eq $name "ngrok-operator") }}
+{{/* Apply skipping logic — ngrok-operator only when ngrok is the ingress; nginx for everything else (localhost, tailnet, etc.) */}}
+{{- if and (not $ossNgrok) (eq $name "ngrok-operator") }}
   true
 {{- else if and $ossNgrok (eq $name "ingress-nginx") }}
   true

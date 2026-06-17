@@ -12,6 +12,9 @@ deployment:
         credentials:
           apiKey: ""
           authtoken: ""
+      tailnet:
+        enabled: false  # Enable Tailscale MagicDNS ingress with nginx + tailscale-issued TLS
+        url: ""         # e.g. openframe-nyc1.tail1293d8.ts.net
     repository:
       baseDir: manifests
       appsDir: apps
